@@ -16,35 +16,17 @@ import { useToast } from '@/components/ui/use-toast';
 import { useWebSocketStore, type ActiveDownloadStatus, type QueuedDownloadStatus, type CompletedDownloadStatus } from '../lib/websocketService';
 
 // Define interfaces to match the table component requirements
-interface ActiveDownload {
-  symbol: string;
-  progress: string;
-  progress_percent: number;
-  chunks_completed: number;
-  total_chunks: number;
-  candles_per_second: number;
-  estimated_remaining_seconds: number;
-  start_time?: string;
-  elapsed_time?: string;
-  time_remaining?: string;
-  time_remaining_seconds?: number;
-  remaining_candles?: number;
-  total_candles?: number;
-  new_candles_added?: number;
+interface ActiveDownload extends ActiveDownloadStatus {
+  time_remaining: string;
+  time_remaining_seconds: number;
 }
 
-interface QueuedDownload {
-  symbol: string;
+interface QueuedDownload extends QueuedDownloadStatus {
   position_in_queue: number;
 }
 
-interface CompletedDownload {
-  symbol: string;
-  downloaded_candles: number;
-  new_candles_added: number;
+interface CompletedDownload extends CompletedDownloadStatus {
   duration: string;
-  completed_at: number;
-  candles_per_second: number;
 }
 
 export default function DashboardPage() {
@@ -184,11 +166,7 @@ export default function DashboardPage() {
   const { overall_stats, active_downloads = [], queued_downloads = [], completed_downloads = [] } = downloadStatus;
 
   // Map the WebSocket data to match the table component interfaces
-  const mappedActiveDownloads = active_downloads.map(download => ({
-    ...download,
-    time_remaining: formatDuration(download.estimated_remaining_seconds),
-    time_remaining_seconds: download.estimated_remaining_seconds,
-  }));
+  const mappedActiveDownloads = active_downloads;  // No need to map, use directly from websocket
 
   const mappedQueuedDownloads = queued_downloads.map(download => ({
     symbol: download.symbol,

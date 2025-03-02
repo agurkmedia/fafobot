@@ -13,6 +13,7 @@ export interface ActiveDownloadStatus {
   new_candles_added: number;
   start_time: string;
   elapsed_time: string;
+  estimated_completion: string;
 }
 
 export interface QueuedDownloadStatus {
@@ -125,20 +126,33 @@ export const useWebSocketStore = create<WebSocketStore>((set) => ({
             // Calculate additional stats and ensure all required fields
             const status: DownloadStatus = {
               ...message.data,
-              active_downloads: message.data.active_downloads.map(download => ({
-                ...download,
-                remaining_candles: download.total_chunks * 1000 - (download.chunks_completed * 1000),
-                total_candles: download.total_chunks * 1000,
-                new_candles_added: download.chunks_completed * 1000,
-                start_time: download.start_time || new Date().toISOString(),
-                elapsed_time: '0s', // TODO: Calculate from start_time
-              })),
+              active_downloads: message.data.active_downloads.map(download => {
+                const now = new Date();
+                
+                // Calculate remaining time and completion
+                const remainingCandles = download.total_chunks * 1000 - (download.chunks_completed * 1000);
+                const estimatedRemainingSeconds = download.candles_per_second > 0 
+                  ? remainingCandles / download.candles_per_second 
+                  : 0;
+                
+                const completionTime = new Date(now.getTime() + (estimatedRemainingSeconds * 1000));
+                
+                return {
+                  ...download,  // Keep original elapsed_time from backend
+                  remaining_candles: remainingCandles,
+                  total_candles: download.total_chunks * 1000,
+                  new_candles_added: download.chunks_completed * 1000,
+                  estimated_completion: completionTime.toLocaleTimeString(),
+                  time_remaining: formatDuration(estimatedRemainingSeconds),
+                  time_remaining_seconds: estimatedRemainingSeconds
+                };
+              }),
               overall_stats: {
                 ...message.data.overall_stats,
                 is_running: message.data.overall_stats.active_downloads > 0,
                 total_candles_to_download: message.data.overall_stats.total_candles_to_download || 
                   message.data.active_downloads.reduce((sum, d) => sum + d.total_chunks * 1000, 0) +
-                  message.data.queued_downloads.length * 1000, // Estimate for queued downloads
+                  message.data.queued_downloads.length * 1000,
               }
             };
             set({ downloadStatus: status });
@@ -207,4 +221,22 @@ export const websocketService = {
   connect: () => useWebSocketStore.getState().connect(),
   disconnect: () => useWebSocketStore.getState().disconnect(),
   getStore: () => useWebSocketStore,
+};
+
+// Update formatDuration to handle edge cases better
+const formatDuration = (seconds: number): string => {
+  if (!seconds || seconds < 0) return '0s';
+  
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = Math.floor(seconds % 60);
+  
+  const parts = [];
+  if (days > 0) parts.push(`${days}d`);
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0) parts.push(`${minutes}m`);
+  if (remainingSeconds > 0 || parts.length === 0) parts.push(`${remainingSeconds}s`);
+  
+  return parts.join(' ');
 }; 
