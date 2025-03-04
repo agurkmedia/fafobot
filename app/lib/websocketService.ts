@@ -14,6 +14,7 @@ export interface ActiveDownloadStatus {
   start_time: string;
   elapsed_time: string;
   estimated_completion: string;
+  remaining_time: string;
 }
 
 export interface QueuedDownloadStatus {
@@ -28,7 +29,7 @@ export interface CompletedDownloadStatus {
   symbol: string;
   downloaded_candles: number;
   new_candles_added: number;
-  duration: number;
+  duration: string;
   completed_at: string;
   candles_per_second: number;
   start_time: string;
@@ -119,46 +120,117 @@ export const useWebSocketStore = create<WebSocketStore>((set) => ({
 
       socket.onmessage = (event) => {
         try {
-          const message: WebSocketMessage = JSON.parse(event.data);
-          console.log('Received WebSocket message type:', message.type);
-          
-          if (message.type === 'download_status') {
-            // Calculate additional stats and ensure all required fields
-            const status: DownloadStatus = {
-              ...message.data,
-              active_downloads: message.data.active_downloads.map(download => {
-                const now = new Date();
-                
-                // Calculate remaining time and completion
-                const remainingCandles = download.total_chunks * 1000 - (download.chunks_completed * 1000);
-                const estimatedRemainingSeconds = download.candles_per_second > 0 
-                  ? remainingCandles / download.candles_per_second 
-                  : 0;
-                
-                const completionTime = new Date(now.getTime() + (estimatedRemainingSeconds * 1000));
-                
-                return {
-                  ...download,  // Keep original elapsed_time from backend
-                  remaining_candles: remainingCandles,
-                  total_candles: download.total_chunks * 1000,
-                  new_candles_added: download.chunks_completed * 1000,
-                  estimated_completion: completionTime.toLocaleTimeString(),
-                  time_remaining: formatDuration(estimatedRemainingSeconds),
-                  time_remaining_seconds: estimatedRemainingSeconds
-                };
-              }),
-              overall_stats: {
-                ...message.data.overall_stats,
-                is_running: message.data.overall_stats.active_downloads > 0,
-                total_candles_to_download: message.data.overall_stats.total_candles_to_download || 
-                  message.data.active_downloads.reduce((sum, d) => sum + d.total_chunks * 1000, 0) +
-                  message.data.queued_downloads.length * 1000,
+          console.log('Raw WebSocket message:', event.data);
+          // Parse the message data if it's a string
+          const rawData = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+          const data = rawData.data; // Extract the data from the message wrapper
+
+          // Transform active downloads from the download_stats and active_items
+          const activeDownloads = (data.active_items || []).map(symbol => {
+            const stats = data.download_stats[symbol] || {};
+            const startTime = stats.start_time ? new Date(stats.start_time * 1000) : new Date();
+            const now = new Date();
+            const elapsed = (now.getTime() - startTime.getTime()) / 1000;
+            const progress = (stats.downloaded_candles || 0) / (stats.total_candles || 1);
+            const estimatedTotal = elapsed / Math.max(progress, 0.001);
+            const remaining = Math.max(0, estimatedTotal - elapsed);
+            
+            return {
+              symbol,
+              progress: `${(progress * 100).toFixed(2)}%`,
+              progress_percent: progress * 100,
+              chunks_completed: stats.chunks_completed || 0,
+              total_chunks: stats.total_chunks || 0,
+              candles_per_second: Math.round(stats.candles_per_second || 0),
+              downloaded_candles: stats.downloaded_candles || 0,
+              total_candles: stats.total_candles || 0,
+              new_candles_added: stats.new_candles_added || 0,
+              start_time: startTime.toISOString(),
+              elapsed_time: formatDuration(elapsed),
+              estimated_completion: stats.estimated_completion || '',
+              estimated_remaining_seconds: remaining,
+              remaining_time: formatDuration(remaining)
+            };
+          });
+
+          // Transform queued downloads from queue_items
+          const queuedDownloads = (data.queue_items || []).map(item => ({
+            symbol: item.symbol,
+            position: item.position
+          }));
+
+          // Transform completed downloads
+          const completedDownloads = (data.completed_items || []).map(item => {
+            // Helper function to safely convert timestamps
+            const toISOString = (timestamp: number | string) => {
+              if (typeof timestamp === 'number') {
+                return new Date(timestamp * 1000).toISOString();
+              }
+              try {
+                // If it's already an ISO string, just validate it
+                return new Date(timestamp).toISOString();
+              } catch {
+                return new Date().toISOString();
               }
             };
-            set({ downloadStatus: status });
+
+            return {
+              ...item,
+              duration: formatDuration(item.duration || 0),
+              start_time: toISOString(item.start_time),
+              end_time: toISOString(item.end_time),
+              completed_at: toISOString(item.completed_at)
+            };
+          });
+
+          // Get earliest start time from all stats and calculate end time from active downloads
+          const allStats = Object.values(data.download_stats);
+          const startTimes = allStats.map(stat => (stat as any).start_time || 0);
+          const validStartTimes = startTimes.filter(t => t > 0);
+          const earliestStart = validStartTimes.length > 0 ? Math.min(...validStartTimes) : 0;
+
+          // Calculate end time based on active downloads' estimated completion
+          let latestEnd = 0;
+          if (activeDownloads.length > 0) {
+            const now = new Date().getTime() / 1000;
+            const estimatedEndTimes = activeDownloads.map(download => 
+              now + (download.estimated_remaining_seconds || 0)
+            );
+            const validEndTimes = estimatedEndTimes.filter(t => t > 0 && Number.isFinite(t));
+            latestEnd = validEndTimes.length > 0 ? Math.max(...validEndTimes) : 0;
           }
+
+          // Create the status object
+          const status: DownloadStatus = {
+            active_downloads: activeDownloads,
+            queued_downloads: queuedDownloads,
+            completed_downloads: completedDownloads,
+            overall_stats: {
+              active_downloads: data.active_downloads || 0,
+              queued_downloads: data.queued_downloads || 0,
+              completed_downloads: data.completed_downloads || 0,
+              total_downloaded_candles: Object.values(data.download_stats).reduce((sum: number, stat: any) => 
+                sum + (stat.downloaded_candles || 0), 0),
+              overall_candles_per_second: Object.values(data.download_stats).reduce((sum: number, stat: any) => 
+                sum + (stat.candles_per_second || 0), 0),
+              estimated_remaining_seconds: Math.max(...Object.values(data.download_stats)
+                .map((stat: any) => stat.estimated_remaining_seconds || 0)),
+              total_candles_to_download: Object.values(data.download_stats).reduce((sum: number, stat: any) => 
+                sum + (stat.total_candles || 0), 0),
+              total_symbols: (data.queue_items || []).length + data.active_downloads + data.completed_downloads,
+              total_chunks: Object.values(data.download_stats).reduce((sum: number, stat: any) => 
+                sum + (stat.total_chunks || 0), 0),
+              completed_chunks: Object.values(data.download_stats).reduce((sum: number, stat: any) => 
+                sum + (stat.chunks_completed || 0), 0),
+              is_running: data.active_downloads > 0,
+              start_time: earliestStart > 0 ? new Date(earliestStart * 1000).toISOString() : undefined,
+              end_time: latestEnd > 0 ? new Date(latestEnd * 1000).toISOString() : undefined
+            }
+          };
+
+          set({ downloadStatus: status });
         } catch (error) {
-          console.error('Error parsing WebSocket message:', error);
+          console.error('Error processing WebSocket message:', error);
           console.log('Raw message data:', event.data);
         }
       };
@@ -223,7 +295,7 @@ export const websocketService = {
   getStore: () => useWebSocketStore,
 };
 
-// Update formatDuration to handle edge cases better
+// Update formatDuration to show all non-zero units
 const formatDuration = (seconds: number): string => {
   if (!seconds || seconds < 0) return '0s';
   

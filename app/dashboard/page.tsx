@@ -32,7 +32,7 @@ interface CompletedDownload extends CompletedDownloadStatus {
 export default function DashboardPage() {
   const { downloadStatus, isConnected, connect, disconnect } = useWebSocketStore();
   const [loading, setLoading] = useState(false);
-  const [concurrencyInput, setConcurrencyInput] = useState('10');
+  const [concurrencyInput, setConcurrencyInput] = useState('30');
   const [symbolInput, setSymbolInput] = useState('');
   const { toast } = useToast();
 
@@ -51,10 +51,10 @@ export default function DashboardPage() {
       setLoading(true);
       const concurrency = parseInt(concurrencyInput);
       
-      if (isNaN(concurrency) || concurrency < 1) {
+      if (isNaN(concurrency) || concurrency < 1 || concurrency > 1000) {
         toast({
           title: 'Error',
-          description: 'Concurrency must be a positive number',
+          description: 'Concurrency must be between 1 and 1000',
           variant: 'destructive',
         });
         return;
@@ -68,7 +68,7 @@ export default function DashboardPage() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          concurrency: concurrency
+          batch_size: concurrency  // Changed from concurrency to batch_size to match backend
         }),
       });
       
@@ -78,9 +78,11 @@ export default function DashboardPage() {
         throw new Error(`Failed to start download: ${errorText}`);
       }
       
+      const result = await response.json();
+      
       toast({
         title: 'Success',
-        description: `Download started with concurrency ${concurrency}`,
+        description: `Started downloading ${result.total_symbols} symbols with batch size ${concurrency}`,
       });
     } catch (error) {
       console.error('Error starting download:', error);
@@ -97,23 +99,28 @@ export default function DashboardPage() {
   const stopDownloads = async () => {
     try {
       setLoading(true);
-      const response = await fetch('/api/market/stop-downloads', {
+      
+      // Stop all active downloads
+      const stopResponse = await fetch('/api/market/stop-downloads', {
         method: 'POST',
       });
       
-      if (!response.ok) {
-        throw new Error('Failed to stop downloads');
+      if (!stopResponse.ok) {
+        const errorText = await stopResponse.text();
+        throw new Error(`Failed to stop downloads: ${errorText}`);
       }
+      
+      const result = await stopResponse.json();
       
       toast({
         title: 'Success',
-        description: 'Downloads stopped successfully',
+        description: result.message || 'All downloads stopped successfully',
       });
     } catch (error) {
       console.error('Error stopping downloads:', error);
       toast({
         title: 'Error',
-        description: 'Failed to stop downloads',
+        description: error instanceof Error ? error.message : 'Failed to stop downloads',
         variant: 'destructive',
       });
     } finally {
@@ -163,20 +170,46 @@ export default function DashboardPage() {
     );
   }
 
-  const { overall_stats, active_downloads = [], queued_downloads = [], completed_downloads = [] } = downloadStatus;
+  // Ensure we have arrays even if the data is undefined
+  const { 
+    overall_stats = {}, 
+    active_downloads = [], 
+    queued_downloads = [], 
+    completed_downloads = [] 
+  } = downloadStatus || {};
 
   // Map the WebSocket data to match the table component interfaces
-  const mappedActiveDownloads = active_downloads;  // No need to map, use directly from websocket
+  const mappedActiveDownloads: ActiveDownload[] = Array.isArray(active_downloads) 
+    ? active_downloads.map(download => ({
+        ...download,
+        time_remaining: formatDuration(download.estimated_remaining_seconds || 0),
+        time_remaining_seconds: download.estimated_remaining_seconds || 0
+      }))
+    : [];
 
-  const mappedQueuedDownloads = queued_downloads.map(download => ({
-    symbol: download.symbol,
-    position_in_queue: download.position,
-  }));
+  const mappedQueuedDownloads: QueuedDownload[] = Array.isArray(queued_downloads) 
+    ? queued_downloads.map(download => ({
+        symbol: download.symbol,
+        position_in_queue: download.position,
+      }))
+    : [];
 
-  const mappedCompletedDownloads = completed_downloads.map(download => ({
-    ...download,
-    duration: formatDuration(download.duration),
-  }));
+  const mappedCompletedDownloads: CompletedDownload[] = Array.isArray(completed_downloads)
+    ? completed_downloads.map(download => ({
+        ...download,
+        duration: formatDuration(typeof download.duration === 'number' ? download.duration : 0),
+        completed_at: download.completed_at || Date.now()
+      }))
+    : [];
+
+  // Add concurrency validation
+  const handleConcurrencyChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    const num = parseInt(value);
+    if (!value || (num >= 1 && num <= 1000)) {
+      setConcurrencyInput(value);
+    }
+  };
 
   return (
     <div className="container mx-auto py-6">
@@ -191,9 +224,11 @@ export default function DashboardPage() {
           <div className="flex items-center space-x-2">
             <Input
               type="number"
-              placeholder="Concurrency"
+              placeholder="Batch Size (1-1000)"
               value={concurrencyInput}
-              onChange={(e) => setConcurrencyInput(e.target.value)}
+              onChange={handleConcurrencyChange}
+              min={1}
+              max={1000}
               className="w-32"
             />
             <Button onClick={startDownload} disabled={loading}>
